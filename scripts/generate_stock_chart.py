@@ -128,6 +128,7 @@ SW_INDUSTRY_MAP = {
     # === 通信 (41) ===
     '4101': ('801102', '通信设备'),
     '4102': ('801223', '通信服务'),
+    '7302': ('801102', '通信设备'),  # 亿联网络等新分类代码
     # === 计算机 (71/42) ===
     '7101': ('801101', '计算机设备'),
     '7103': ('801103', 'IT服务Ⅱ'),
@@ -268,10 +269,60 @@ def get_sw_industry(code):
     """
     根据股票代码查询其所属申万二级行业指数。
     返回 (sw_index_code, sw_index_name) 或 None。
+
+    策略1: stock_industry_clf_hist_sw 获取 industry_name → 动态匹配 index_realtime_sw 指数名称
+    策略2: 静态映射表 SW_INDUSTRY_MAP (industry_code 前4位 → 指数代码)
+    策略3: stock_individual_info_em 获取行业名 → 名称匹配
+    策略4: 降级为双线图
     """
     print(f"  查询申万行业归属...")
 
-    # === 策略1: stock_industry_clf_hist_sw + 映射表 ===
+    # --- 获取所有 SW 二级行业指数列表 (用于名称匹配) ---
+    sw_indices = None
+    try:
+        sw_indices = ak.index_realtime_sw()
+        if sw_indices is not None and not sw_indices.empty:
+            # 列名可能是中文，统一重命名
+            if '指数代码' not in sw_indices.columns:
+                sw_indices.columns = ['指数代码', '指数名称', '日期', '开盘', '收盘', '成交量', '成交额', '最高', '最低']
+            sw_indices['指数代码'] = sw_indices['指数代码'].astype(str)
+            sw_indices['指数名称'] = sw_indices['指数名称'].astype(str)
+            print(f"  获取到 {len(sw_indices)} 个申万行业指数")
+    except Exception as e:
+        print(f"  获取 SW 指数列表失败: {e}")
+
+    def match_sw_index_by_name(industry_name):
+        """通过行业名称在 SW 指数列表中匹配对应的指数代码"""
+        if sw_indices is None or sw_indices.empty or not industry_name:
+            return None
+
+        # 清理名称中的 II/Ⅱ 后缀以增强匹配
+        clean_name = industry_name.replace('Ⅱ', '').replace('II', '').replace('Ⅱ', '').strip()
+        clean_indices = sw_indices.copy()
+        clean_indices['clean_name'] = clean_indices['指数名称'].str.replace('Ⅱ', '').str.replace('II', '').str.strip()
+
+        # 1. 精确匹配
+        match = clean_indices[clean_indices['clean_name'] == clean_name]
+        if not match.empty:
+            return match.iloc[0]['指数代码'], match.iloc[0]['指数名称']
+
+        # 2. 包含匹配 (industry_name 包含在指数名称中, 或反之)
+        match = clean_indices[clean_indices['clean_name'].str.contains(clean_name, na=False)]
+        if not match.empty:
+            return match.iloc[0]['指数代码'], match.iloc[0]['指数名称']
+
+        match = clean_indices[clean_indices['clean_name'].apply(lambda x: clean_name in x if x else False)]
+        if not match.empty:
+            return match.iloc[0]['指数代码'], match.iloc[0]['指数名称']
+
+        # 3. 反向包含 (指数名称包含在 industry_name 中)
+        match = clean_indices[clean_indices['clean_name'].apply(lambda x: x in clean_name if x else False)]
+        if not match.empty:
+            return match.iloc[0]['指数代码'], match.iloc[0]['指数名称']
+
+        return None
+
+    # === 策略1: stock_industry_clf_hist_sw → 动态名称匹配 ===
     try:
         df = ak.stock_industry_clf_hist_sw()
         df['start_date'] = df['start_date'].astype(str)
@@ -279,15 +330,25 @@ def get_sw_industry(code):
         rows = df_latest[df_latest['symbol'] == code]
         if not rows.empty:
             industry_code = str(rows.iloc[0]['industry_code'])
+            industry_name = str(rows.iloc[0].get('industry_name', ''))
             second_level = industry_code[:4]
-            print(f"  行业代码: {industry_code} (二级: {second_level})")
+            print(f"  行业代码: {industry_code} (二级: {second_level}), 行业名称: {industry_name}")
 
+            # 1a. 先尝试动态名称匹配 (最可靠, 不依赖静态表)
+            if industry_name:
+                result = match_sw_index_by_name(industry_name)
+                if result:
+                    print(f"  申万二级行业(名称匹配): {result[1]}({result[0]})")
+                    return result
+                print(f"  名称匹配未命中, 尝试映射表...")
+
+            # 1b. 映射表兜底
             if second_level in SW_INDUSTRY_MAP:
                 sw_code, sw_name = SW_INDUSTRY_MAP[second_level]
-                print(f"  申万二级行业: {sw_name}({sw_code})")
+                print(f"  申万二级行业(映射表): {sw_name}({sw_code})")
                 return sw_code, sw_name
             else:
-                print(f"  映射表中未找到二级代码 {second_level}，尝试名称匹配...")
+                print(f"  映射表中也未找到二级代码 {second_level}")
     except Exception as e:
         print(f"  stock_industry_clf_hist_sw 失败: {e}")
 
@@ -299,44 +360,14 @@ def get_sw_industry(code):
             industry_name = industry_row.iloc[0]['value']
             print(f"  个股行业(eastmoney): {industry_name}")
 
-            # 获取 SW 二级行业列表
-            df_sw = ak.index_realtime_sw(symbol='二级行业')
-            if df_sw is not None and not df_sw.empty:
-                # 精确匹配
-                match = df_sw[df_sw['指数名称'].str.replace('Ⅱ', '').str.strip() == industry_name]
-                if not match.empty:
-                    sw_code = match.iloc[0]['指数代码']
-                    sw_name = match.iloc[0]['指数名称']
-                    print(f"  申万二级行业(精确): {sw_name}({sw_code})")
-                    return sw_code, sw_name
-                # 模糊匹配
-                match = df_sw[df_sw['指数名称'].str.contains(industry_name)]
-                if not match.empty:
-                    sw_code = match.iloc[0]['指数代码']
-                    sw_name = match.iloc[0]['指数名称']
-                    print(f"  申万二级行业(模糊): {sw_name}({sw_code})")
-                    return sw_code, sw_name
+            if sw_indices is not None and not sw_indices.empty:
+                result = match_sw_index_by_name(industry_name)
+                if result:
+                    print(f"  申万二级行业(EM匹配): {result[1]}({result[0]})")
+                    return result
+                print(f"  名称匹配未命中")
     except Exception as e:
         print(f"  stock_individual_info_em 失败: {e}")
-
-    # === 策略3: 遍历 SW 指数成分股 (最后手段, 较慢) ===
-    print(f"  尝试遍历 SW 指数成分股 (可能较慢)...")
-    try:
-        df_sw = ak.index_realtime_sw(symbol='二级行业')
-        if df_sw is not None and not df_sw.empty:
-            for _, row in df_sw.iterrows():
-                sw_code = row['指数代码']
-                sw_name = row['指数名称']
-                try:
-                    df_cons = ak.sw_index_third_cons(symbol=sw_code)
-                    if df_cons is not None and not df_cons.empty and code in df_cons['股票代码'].values:
-                        print(f"  申万二级行业(遍历): {sw_name}({sw_code})")
-                        return sw_code, sw_name
-                except:
-                    continue
-                time.sleep(0.2)
-    except Exception as e:
-        print(f"  遍历失败: {e}")
 
     print(f"  ⚠ 无法找到申万行业归属，将跳过行业指数线")
     return None
