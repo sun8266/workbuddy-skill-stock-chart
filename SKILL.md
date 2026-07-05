@@ -1,5 +1,8 @@
 ---
 name: stock-normalized-chart
+slug: stock-normalized-chart
+displayName: A股归一化走势图生成器
+version: 1.0.0
 description: >-
   A股个股归一化走势图生成器。输入股票名称或代码，自动生成过去一年（可自定义天数）的
   收盘价、PE(TTM)、申万二级行业指数三条归一化曲线（首日=1.0）的交互式HTML点线图。
